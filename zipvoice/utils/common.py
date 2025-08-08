@@ -19,6 +19,9 @@ from torch import distributed as dist
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
+from wandb.wandb_run import Run
+
+from zipvoice.models.modules.utils import NJT
 
 
 if hasattr(torch.amp, "GradScaler"):
@@ -145,6 +148,25 @@ class MetricsTracker(collections.defaultdict):
         for k, v in self.norm_items():
             tb_writer.add_scalar(prefix + k, v, batch_idx)
 
+    def write_wandb(
+        self,
+        run: Run,
+        prefix: str,
+        batch_idx: int,
+    ) -> None:
+        """Add logging information to a TensorBoard writer.
+
+        Args:
+            run: a wandb.Run object
+            prefix: a prefix for the name of the loss, e.g. "train/valid_",
+                or "train/current_"
+            batch_idx: The current batch index, used as the x-axis of the plot.
+        """
+        metric_dict = {}
+        for k, v in self.norm_items():
+            metric_dict[prefix + k] = v
+        run.log(metric_dict, step=batch_idx)
+
 
 @contextmanager
 def torch_autocast(device_type="cuda", **kwargs):
@@ -236,7 +258,7 @@ def prepare_input(
     return_list = []
 
     if return_tokens:
-        return_list += [batch["tokens"]]
+        return_list += [NJT(batch["tokens"]).to(device)]
 
     if return_feature:
         features = batch["features"].to(device)

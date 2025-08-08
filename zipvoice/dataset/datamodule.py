@@ -34,6 +34,7 @@ from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
 from zipvoice.dataset.dataset import SpeechSynthesisDataset
+from zipvoice.dataset.input_strategies import PrecomputedFeaturesNJT
 from zipvoice.utils.common import str2bool
 from zipvoice.utils.feature import VocosFbank
 
@@ -139,15 +140,14 @@ class TtsDataModule:
             "--num-workers",
             type=int,
             default=8,
-            help="The number of training dataloader workers that "
-            "collect the batches.",
+            help="The number of training dataloader workers that collect the batches.",
         )
 
         group.add_argument(
             "--input-strategy",
             type=str,
             default="PrecomputedFeatures",
-            help="AudioSamples or PrecomputedFeatures",
+            help="AudioSamples or PrecomputedFeatures or PrecomputedFeaturesNJT",
         )
 
     def train_dataloaders(
@@ -170,6 +170,8 @@ class TtsDataModule:
             return_spk_ids=True,
             feature_input_strategy=OnTheFlyFeatures(VocosFbank())
             if self.args.on_the_fly_feats
+            else PrecomputedFeaturesNJT()
+            if self.args.input_strategy == "PrecomputedFeaturesNJT"
             else PrecomputedFeatures(),
             return_cuts=self.args.return_cuts,
         )
@@ -222,6 +224,8 @@ class TtsDataModule:
             return_spk_ids=True,
             feature_input_strategy=OnTheFlyFeatures(VocosFbank())
             if self.args.on_the_fly_feats
+            else PrecomputedFeaturesNJT()
+            if self.args.input_strategy == "PrecomputedFeaturesNJT"
             else PrecomputedFeatures(),
             return_cuts=self.args.return_cuts,
         )
@@ -249,6 +253,8 @@ class TtsDataModule:
             return_spk_ids=True,
             feature_input_strategy=OnTheFlyFeatures(VocosFbank())
             if self.args.on_the_fly_feats
+            else PrecomputedFeaturesNJT()
+            if self.args.input_strategy == "PrecomputedFeaturesNJT"
             else PrecomputedFeatures(),
             return_cuts=self.args.return_cuts,
             return_audio=True,

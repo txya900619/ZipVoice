@@ -205,9 +205,9 @@ class EmiliaTokenizer(Tokenizer):
           tokens: the file that contains information that maps tokens to ids,
             which is a text file with '{token}\t{token_id}' per line.
         """
-        assert (
-            token_type == "phone"
-        ), f"Only support phone tokenizer for Emilia, but get {token_type}."
+        assert token_type == "phone", (
+            f"Only support phone tokenizer for Emilia, but get {token_type}."
+        )
 
         self.english_normalizer = EnglishTextNormalizer()
         self.chinese_normalizer = ChineseTextNormalizer()
@@ -529,7 +529,7 @@ class LibriTTSTokenizer(Tokenizer):
         try:
             import tacotron_cleaner.cleaners
         except Exception as ex:
-            raise RuntimeError(f"{ex}\nPlease run\n" "pip install espnet_tts_frontend")
+            raise RuntimeError(f"{ex}\nPlease run\npip install espnet_tts_frontend")
 
         self.normalize = tacotron_cleaner.cleaners.custom_english_cleaners
 
@@ -611,6 +611,37 @@ class LibriTTSTokenizer(Tokenizer):
         return token_ids_list
 
 
+class ByteTokenizer(Tokenizer):
+    def __init__(self):
+        try:
+            import tacotron_cleaner.cleaners
+        except Exception as ex:
+            raise RuntimeError(f"{ex}\nPlease run\npip install espnet_tts_frontend")
+        self.normalize = tacotron_cleaner.cleaners.custom_english_cleaners
+
+        self.vocab_size = 256
+        self.eos_idx = 255
+        self.eos = b"\xff"
+
+    def texts_to_token_ids(
+        self,
+        texts: List[str],
+    ) -> List[List[int]]:
+        return [list(text.encode() + self.eos) for text in texts]
+
+    def texts_to_tokens(
+        self,
+        texts: List[str],
+    ) -> List[List[str]]:
+        raise NotImplementedError
+
+    def tokens_to_token_ids(
+        self,
+        tokens_list: List[List[str]],
+    ) -> List[List[int]]:
+        raise NotImplementedError
+
+
 def add_tokens(cut_set: CutSet, tokenizer: str, lang: str):
     if tokenizer == "emilia":
         tokenizer = EmiliaTokenizer()
@@ -622,6 +653,8 @@ def add_tokens(cut_set: CutSet, tokenizer: str, lang: str):
         tokenizer = LibriTTSTokenizer()
     elif tokenizer == "simple":
         tokenizer = SimpleTokenizer()
+    elif tokenizer == "byte":
+        tokenizer = ByteTokenizer()
     else:
         raise ValueError(f"Unsupported tokenizer: {tokenizer}.")
 

@@ -1,5 +1,36 @@
-[tool.isort]
-profile = "black"
+[project]
+name = "zipvoice"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "cn2an>=0.5.23",
+    "espnet-tts-frontend>=0.0.3",
+    "jieba>=0.42.1",
+    "lhotse[orjson]>=1.30.3",
+    "pypinyin>=0.55.0",
+    "tensorboard>=2.20.0",
+    "torch>=2.7.1",
+    "torchaudio>=2.7.1",
+    "triton>=3.3.1",
+    "wandb>=0.21.0",
+]
 
-[tool.black]
-line-length = 88
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["zipvoice"]
+
+[build-system]
+requires = [
+    "setuptools>=61.0.0",
+    "wheel",
+    "packaging",
+]
+build-backend = "setuptools.build_meta"
+
+[project.optional-dependencies]
+build = ["mamba-ssm", "flash-attn", "causal-conv1d"]
+
+[tool.uv]
+no-build-isolation-package = ["flash-attn", "mamba-ssm", "causal-conv1d"]
