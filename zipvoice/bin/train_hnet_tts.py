@@ -843,10 +843,6 @@ def run(rank, world_size, args):
     if params.num_iters > 0:
         params.num_epochs = 1000000
 
-    model_config = HNetConfig.load_config(
-        params.model_config, N_compress=params.n_compression
-    )
-
     # with open(params.model_config, "r") as f:
     #     model_config = json.load(f)
     # params.update(model_config["model"])
@@ -893,6 +889,14 @@ def run(rank, world_size, args):
         "eos_idx": tokenizer.eos_idx,
     }
     params.update(tokenizer_config)
+
+    model_config = HNetConfig.load_config(
+        params.model_config,
+        N_compress=params.n_compression,
+        vocab_size=tokenizer.vocab_size,
+    )
+
+    params["model_config"] = dict(model_config)
 
     logging.info(params)
 
