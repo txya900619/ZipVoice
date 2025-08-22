@@ -46,6 +46,7 @@ from pathlib import Path
 from shutil import copyfile
 from typing import List, Optional, Tuple, Union
 
+import matplotlib.pyplot as plt
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
@@ -345,7 +346,7 @@ def get_parser():
         "-N",
         "--n-compression",
         type=str,
-        default="1-3-9",
+        default="1-2-4",
         help="""
 compression depth to target with L_ratio. this is a bit different from the paper's notation;
 n_compression = [1,3,9] -> N = [3/1, 9/3]
@@ -415,7 +416,7 @@ def compute_fbank_loss(
     features_lens: Tensor,
     tokens: List[List[int]],
     is_training: bool,
-    alpha=0.00003,  # origin 0.03
+    alpha=3e-2,  # origin 0.03
 ) -> Tuple[Tensor, MetricsTracker]:
     """
     Compute loss given the model and its inputs.
@@ -438,12 +439,11 @@ def compute_fbank_loss(
     """
 
     with torch.set_grad_enabled(is_training):
-        mse_loss, loss_rt, comp_ratios = model(
+        pred_mels, l1_and_mse_loss, loss_rt, comp_ratios = model(
             iids=tokens,
             mels=features,
-            mels_lens=features_lens,
         )
-        loss = mse_loss + alpha * loss_rt
+        loss = l1_and_mse_loss + alpha * loss_rt
 
     assert loss.requires_grad == is_training
     info = MetricsTracker()
@@ -451,11 +451,11 @@ def compute_fbank_loss(
     info["frames"] = num_frames
     info["loss"] = loss.detach().cpu().item()
     info["loss_rt"] = loss_rt.detach().cpu().item()
-    info["mse_loss"] = mse_loss.detach().cpu().item()
+    info["l1_and_mse_loss"] = l1_and_mse_loss.detach().cpu().item()
     for i, comp_ratio in enumerate(comp_ratios):
         info[f"comp_ratio_{i}"] = comp_ratio
 
-    return loss, info
+    return pred_mels, loss, info
 
 
 def train_one_epoch(
@@ -541,6 +541,7 @@ def train_one_epoch(
                 model=model,
                 valid_dl=valid_dl,
                 world_size=world_size,
+                rank=rank,
             )
             model.train()
             logging.info(
@@ -567,8 +568,8 @@ def train_one_epoch(
         )
 
         try:
-            with torch_autocast(dtype=torch.float16, enabled=params.use_fp16):
-                loss, loss_info = compute_fbank_loss(
+            with torch_autocast(dtype=torch.bfloat16, enabled=params.use_fp16):
+                pred_mels, loss, loss_info = compute_fbank_loss(
                     model=model,
                     features=features,
                     features_lens=features_lens,
@@ -578,14 +579,9 @@ def train_one_epoch(
 
             tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
 
-            scaler.scale(loss).backward()
+            loss.backward()
+            optimizer.step()
 
-            # add gradient clipping
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-
-            scaler.step(optimizer)
-            scaler.update()
             optimizer.zero_grad()
             scheduler.step()
         except Exception as e:
@@ -630,30 +626,30 @@ def train_one_epoch(
             )
         if params.num_iters > 0 and params.batch_idx_train > params.num_iters:
             break
-        if params.batch_idx_train % 100 == 0 and params.use_fp16:
-            # If the grad scale was less than 1, try increasing it. The _growth_interval
-            # of the grad scaler is configurable, but we can't configure it to have
-            # different behavior depending on the current grad scale.
-            cur_grad_scale = scaler._scale.item()
+        # if params.batch_idx_train % 100 == 0 and params.use_fp16:
+        #     # If the grad scale was less than 1, try increasing it. The _growth_interval
+        #     # of the grad scaler is configurable, but we can't configure it to have
+        #     # different behavior depending on the current grad scale.
+        #     cur_grad_scale = scaler._scale.item()
 
-            if cur_grad_scale < 1024.0 or (
-                cur_grad_scale < 4096.0 and params.batch_idx_train % 400 == 0
-            ):
-                scaler.update(cur_grad_scale * 2.0)
-            if cur_grad_scale < 0.01:
-                if not saved_bad_model:
-                    save_bad_model(suffix="-first-warning")
-                    saved_bad_model = True
-                logging.warning(f"Grad scale is small: {cur_grad_scale}")
-            if cur_grad_scale < 1.0e-05:
-                save_bad_model()
-                raise RuntimeError(
-                    f"grad_scale is too small, exiting: {cur_grad_scale}"
-                )
+        #     if cur_grad_scale < 1024.0 or (
+        #         cur_grad_scale < 4096.0 and params.batch_idx_train % 400 == 0
+        #     ):
+        #         scaler.update(cur_grad_scale * 2.0)
+        #     if cur_grad_scale < 0.01:
+        #         if not saved_bad_model:
+        #             save_bad_model(suffix="-first-warning")
+        #             saved_bad_model = True
+        #         logging.warning(f"Grad scale is small: {cur_grad_scale}")
+        #     if cur_grad_scale < 1.0e-05:
+        #         save_bad_model()
+        #         raise RuntimeError(
+        #             f"grad_scale is too small, exiting: {cur_grad_scale}"
+        #         )
 
         if params.batch_idx_train % params.log_interval == 0:
             cur_lr = max(scheduler.get_last_lr())
-            cur_grad_scale = scaler._scale.item() if params.use_fp16 else 1.0
+            # cur_grad_scale = scaler._scale.item() if params.use_fp16 else 1.0
 
             logging.info(
                 f"Epoch {params.cur_epoch}, batch {batch_idx}, "
@@ -661,7 +657,7 @@ def train_one_epoch(
                 f"batch size: {batch_size}, "
                 f"loss[{loss_info}], tot_loss[{tot_loss}], "
                 f"cur_lr: {cur_lr:.2e}, "
-                + (f"grad_scale: {scaler._scale.item()}" if params.use_fp16 else "")
+                # + (f"grad_scale: {scaler._scale.item()}" if params.use_fp16 else "")
             )
 
             if run is not None:
@@ -674,13 +670,13 @@ def train_one_epoch(
 
                 loss_info.write_wandb(run, "train/current_", params.batch_idx_train)
                 tot_loss.write_wandb(run, "train/tot_", params.batch_idx_train)
-                if params.use_fp16:
-                    run.log(
-                        {
-                            "train/grad_scale": cur_grad_scale,
-                        },
-                        step=params.batch_idx_train,
-                    )
+                # if params.use_fp16:
+                #     run.log(
+                #         {
+                #             "train/grad_scale": cur_grad_scale,
+                #         },
+                #         step=params.batch_idx_train,
+                #     )
 
     loss_value = tot_loss["loss"]
     params.train_loss = loss_value
@@ -694,6 +690,7 @@ def compute_validation_loss(
     model: Union[nn.Module, DDP],
     valid_dl: torch.utils.data.DataLoader,
     world_size: int = 1,
+    rank: int = 0,
 ) -> MetricsTracker:
     """Run the validation process."""
 
@@ -711,14 +708,48 @@ def compute_validation_loss(
             return_tokens=True,
             return_feature=True,
         )
-        with torch_autocast(dtype=torch.float16, enabled=params.use_fp16):
-            loss, loss_info = compute_fbank_loss(
+        with torch_autocast(dtype=torch.bfloat16, enabled=params.use_fp16):
+            pred_mels, loss, loss_info = compute_fbank_loss(
                 model=model,
                 features=features,
                 features_lens=features_lens,
                 tokens=tokens,
                 is_training=False,
             )
+            if batch_idx == 0 and rank == 0:
+                # 取第 0 個
+                pm = pred_mels[0].detach().cpu().float()
+                tgt = features[0].detach().cpu().float()
+
+                # 確保形狀為 (時間, 頻率) 方便顯示；若現在是 (freq, time) 可轉置
+                def to_time_freq(x: torch.Tensor):
+                    if x.ndim == 2:
+                        # 兩種常見: (T, F) 或 (F, T)；假設頻率維通常較小
+                        return x if x.shape[1] <= x.shape[0] else x.T
+                    return x
+
+                pm_tf = to_time_freq(pm)
+                tgt_tf = to_time_freq(tgt)
+
+                fig, axes = plt.subplots(2, 1, figsize=(8, 6), constrained_layout=True)
+                im0 = axes[0].imshow(tgt_tf.T, origin="lower", aspect="auto")
+                axes[0].set_title("Target Mel (idx 0)")
+                fig.colorbar(im0, ax=axes[0], shrink=0.6)
+
+                im1 = axes[1].imshow(pm_tf.T, origin="lower", aspect="auto")
+                axes[1].set_title("Pred Mel (idx 0)")
+                fig.colorbar(im1, ax=axes[1], shrink=0.6)
+
+                wandb.log(
+                    {
+                        "valid/mel_compare_0": wandb.Image(fig),
+                        "valid/pred_mels_0_hist": wandb.Histogram(pm_tf.numpy()),
+                        "valid/features_0_hist": wandb.Histogram(tgt_tf.numpy()),
+                    },
+                    step=params.batch_idx_train,
+                )
+                plt.close(fig)
+
         assert loss.requires_grad is False
         tot_loss = tot_loss + loss_info
 
@@ -786,8 +817,8 @@ def scan_pessimistic_batches_for_oom(
             return_feature=True,
         )
         try:
-            with torch_autocast(dtype=torch.float16, enabled=params.use_fp16):
-                loss, loss_info = compute_fbank_loss(
+            with torch_autocast(dtype=torch.bfloat16, enabled=params.use_fp16):
+                pre_mels, loss, loss_info = compute_fbank_loss(
                     params=params,
                     model=model,
                     features=features,
@@ -838,7 +869,7 @@ def run(rank, world_size, args):
     params = get_params()
     params.update(vars(args))
     params.valid_interval = params.save_every_n
-    params.n_compression = [int(s) for s in params.n_compression.split("-")]
+    params.n_compression = [float(s) for s in params.n_compression.split("-")]
     # Set epoch to a large number to ignore it.
     if params.num_iters > 0:
         params.num_epochs = 1000000
@@ -895,8 +926,6 @@ def run(rank, world_size, args):
         N_compress=params.n_compression,
         vocab_size=tokenizer.vocab_size,
     )
-
-    params["model_config"] = dict(model_config)
 
     logging.info(params)
 

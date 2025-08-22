@@ -190,7 +190,7 @@ class CausalMHA(nn.Module):
         assert _r == 0
         self.Wqkv = Lin(d, d * 3)
         self.out_proj = Lin(d, d)
-        rope_cache = RotaryNeoX.rotary_cache(10000.0, rotary_emb_dim, 2048)
+        rope_cache = RotaryNeoX.rotary_cache(10000.0, rotary_emb_dim, 4096)
         self.register_buffer("rope_cache", torch.stack(rope_cache), persistent=False)
 
     def forward(
@@ -348,6 +348,7 @@ class Isotropic(nn.Module):
             "https://github.com/state-spaces/mamba/issues/351#issuecomment-2167091940"
         )
 
+        self.height = 0
         i = -1
         self.layers = nn.ModuleList(
             [
@@ -363,6 +364,12 @@ class Isotropic(nn.Module):
                 for _ in range(int(n_layer))
             ]
         )
+
+        for arch, n_layer in re.findall(r"([mMtT])(\d+)", arch):
+            if arch.islower():
+                self.height += int(n_layer)
+            else:
+                self.height += 2 * int(n_layer)
         self.rmsnorm = RMSNorm(self.d, eps=1e-5)
 
     def forward_flat(self, x: Tensor, *, res=None):
@@ -412,7 +419,7 @@ class Isotropic(nn.Module):
 
 class ComputePaddedQ(torch.autograd.Function):
     @staticmethod
-    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.bfloat16)
     def forward(ctx, x: Tensor, w: Tensor, k: Tensor):
         assert x.layout == torch.jagged == k.layout and x.is_nested and k.is_nested
         x_flat, x_cu = x.values(), x.offsets()
@@ -636,7 +643,7 @@ class HNet(nn.Module):
         keep_expert = self.n * f * g
         return keep_expert + drop_experts
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor, text_condition: Tensor):
         d_orig = x.shape[-1]
         x = (
             x
@@ -651,7 +658,25 @@ class HNet(nn.Module):
         )
 
         if self.is_innermost:
-            return self.main_network(x)[..., :d_orig], 0, []
+            text_condition_lengths = text_condition.offsets().diff()
+            unbond = [text_condition.unbind(), x.unbind()]
+
+            concated_unbond = [
+                torch.cat((t_i, x_i), dim=0) for t_i, x_i in zip(*unbond)
+            ]
+            text_and_x = nested.nested_tensor(concated_unbond, layout=torch.jagged)
+
+            text_and_x = self.main_network(text_and_x)
+
+            unbond = [text_and_x.unbind(), text_condition_lengths]
+            ouput_unbond = [t_x_i[length:, :] for t_x_i, length in zip(*unbond)]
+
+            output = nested.nested_tensor(ouput_unbond, layout=torch.jagged)
+            output = nested.nested_tensor_from_jagged(
+                values=output.values(), offsets=x.offsets()
+            )
+
+            return output[..., :d_orig], 0, []
 
         r = self.encoder(x).type_as(x)
 
@@ -663,7 +688,7 @@ class HNet(nn.Module):
         )
 
         # compute main chunks && dechunk to outer seqlen
-        h, r_loss, comp_ratio = self.main_network(h)
+        h, r_loss, comp_ratio = self.main_network(h, text_condition)
         comp_ratio.append(bpred.p_selected.numel() / bpred.p.numel())
         x = self.dechunk_layer(h, bpred)
 
@@ -675,3 +700,49 @@ class HNet(nn.Module):
             r_loss + self.ratio_loss(bpred),
             comp_ratio,
         )
+
+    def _init_weights(self, initializer_range: float = 0.02, parent_residuals: int = 0):
+        n_residuals = parent_residuals
+        if self.is_innermost:
+            n_residuals += self.main_network.height
+            for name, m in self.main_network.named_modules():
+                if isinstance(m, nn.Linear) and not getattr(
+                    m.weight, "_no_reinit", False
+                ):
+                    if "out_proj" in name or "fc2" in name:
+                        nn.init.normal_(
+                            m.weight,
+                            mean=0.0,
+                            std=initializer_range / (n_residuals**0.5),
+                        )
+                    else:
+                        nn.init.normal_(m.weight, mean=0.0, std=initializer_range)
+
+        else:
+            n_residuals += self.encoder.height + self.decoder.height
+            for name, m in self.encoder.named_modules():
+                if isinstance(m, nn.Linear) and not getattr(
+                    m.weight, "_no_reinit", False
+                ):
+                    if "out_proj" in name or "fc2" in name:
+                        nn.init.normal_(
+                            m.weight,
+                            mean=0.0,
+                            std=initializer_range / (n_residuals**0.5),
+                        )
+                    else:
+                        nn.init.normal_(m.weight, mean=0.0, std=initializer_range)
+            for name, m in self.decoder.named_modules():
+                if isinstance(m, nn.Linear) and not getattr(
+                    m.weight, "_no_reinit", False
+                ):
+                    if "out_proj" in name or "fc2" in name:
+                        nn.init.normal_(
+                            m.weight,
+                            mean=0.0,
+                            std=initializer_range / (n_residuals**0.5),
+                        )
+                    else:
+                        nn.init.normal_(m.weight, mean=0.0, std=initializer_range)
+
+            self.main_network._init_weights(initializer_range, n_residuals)
