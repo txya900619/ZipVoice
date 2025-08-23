@@ -356,6 +356,12 @@ n_compression = [1,3,9] -> N = [3/1, 9/3]
     parser.add_argument(
         "--base-lr", type=float, default=3e-4, help="The base learning rate."
     )
+    parser.add_argument(
+        "--stop-loss-weight",
+        type=float,
+        default=1.0,
+        help="The weight of the stop loss.",
+    )
 
     return parser
 
@@ -417,6 +423,7 @@ def compute_fbank_loss(
     tokens: List[List[int]],
     is_training: bool,
     alpha=3e-2,  # origin 0.03
+    stop_loss_weight=1.0,
 ) -> Tuple[Tensor, MetricsTracker]:
     """
     Compute loss given the model and its inputs.
@@ -439,11 +446,11 @@ def compute_fbank_loss(
     """
 
     with torch.set_grad_enabled(is_training):
-        pred_mels, l1_and_mse_loss, loss_rt, comp_ratios = model(
+        pred_mels, l1_and_mse_loss, loss_rt, comp_ratios, stop_loss = model(
             iids=tokens,
             mels=features,
         )
-        loss = l1_and_mse_loss + alpha * loss_rt
+        loss = l1_and_mse_loss + alpha * loss_rt + stop_loss_weight * stop_loss
 
     assert loss.requires_grad == is_training
     info = MetricsTracker()
@@ -452,6 +459,7 @@ def compute_fbank_loss(
     info["loss"] = loss.detach().cpu().item()
     info["loss_rt"] = loss_rt.detach().cpu().item()
     info["l1_and_mse_loss"] = l1_and_mse_loss.detach().cpu().item()
+    info["stop_loss"] = stop_loss.detach().cpu().item()
     for i, comp_ratio in enumerate(comp_ratios):
         info[f"comp_ratio_{i}"] = comp_ratio
 
@@ -575,6 +583,7 @@ def train_one_epoch(
                     features_lens=features_lens,
                     tokens=tokens,
                     is_training=True,
+                    stop_loss_weight=params.stop_loss_weight,
                 )
 
             tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
@@ -917,7 +926,6 @@ def run(rank, world_size, args):
 
     tokenizer_config = {
         "vocab_size": tokenizer.vocab_size,
-        "eos_idx": tokenizer.eos_idx,
     }
     params.update(tokenizer_config)
 

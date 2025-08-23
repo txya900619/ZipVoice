@@ -18,6 +18,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
 from zipvoice.models.config.hnet import HNetConfig
@@ -37,6 +38,7 @@ class HNetTTS(nn.Module):
         self.mel_output_linear = nn.Linear(mel_d, 100)
 
         self.mel_bos = nn.Parameter(torch.randn(1, mel_d))
+        self.stop_head = nn.Linear(mel_d, 1)
         self.init_weights()
 
     def forward(self, iids: Tensor, mels: Tensor):
@@ -52,12 +54,22 @@ class HNetTTS(nn.Module):
         )
 
         x, *others = self.backbone(mels_input, text_condition)
+        stop_logits = self.stop_head(x)
+        stop_labels = torch.zeros_like(stop_logits.values())
+        stop_labels[stop_logits.offsets()[1:] - 1] = 1
+        stop_loss = F.binary_cross_entropy_with_logits(
+            stop_logits.values(),
+            stop_labels,
+            pos_weight=torch.Tensor([100]).to(stop_logits.values().device),  # or 1000
+        )
+
+        # x = NJT([x_i[:-1] for x_i in x.unbind()])
         x = self.mel_output_linear(x)
 
         l1_loss = torch.nn.functional.l1_loss(x.values(), mels.values())
         mse_loss = torch.nn.functional.mse_loss(x.values(), mels.values())
 
-        return (x, l1_loss + mse_loss, *others)
+        return (x, l1_loss + mse_loss, *others, stop_loss)
 
     def sample(
         self,
