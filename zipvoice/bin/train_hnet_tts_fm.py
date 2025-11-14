@@ -44,7 +44,6 @@ from pathlib import Path
 from shutil import copyfile
 from typing import List, Optional, Tuple, Union
 
-import matplotlib.pyplot as plt
 import torch
 import torch.distributed as dist
 import wandb
@@ -54,12 +53,13 @@ from lhotse.utils import fix_random_seed
 from torch import Tensor, nn
 from torch.distributed import device_mesh as tdm
 from torch.distributed import fsdp
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import Optimizer
 from wandb.wandb_run import Run
 
 import zipvoice.utils.diagnostics as diagnostics
 from zipvoice.dataset.datamodule import TtsDataModule
-from zipvoice.models.hnet_tts import HNetTTS
+from zipvoice.models.hnet_tts_fm import HNetTTS
 from zipvoice.tokenizer.tokenizer import (
     ByteTokenizer,
     EmiliaTokenizer,
@@ -200,7 +200,7 @@ def get_parser():
     parser.add_argument(
         "--save-every-n",
         type=int,
-        default=5000,
+        default=20000,
         help="""Save checkpoint after processing this number of batches"
         periodically. We save checkpoint to exp-dir/ whenever
         params.batch_idx_train % save_every_n == 0. The checkpoint filename
@@ -222,7 +222,7 @@ def get_parser():
     parser.add_argument(
         "--keep-last-k",
         type=int,
-        default=30,
+        default=5,
         help="""Only keep this number of checkpoints on disk.
         For instance, if it is 3, there are only 3 checkpoints
         in the exp-dir with filenames `checkpoint-xxx.pt`.
@@ -425,41 +425,46 @@ def compute_fbank_loss(
         function enables autograd during computation; when it is False, it
         disables autograd.
     """
+    device = model.device if isinstance(model, DDP) else next(model.parameters()).device
     num_frames = features.values().shape[0]
+    noise = torch.randn_like(features.values())
+
+    if is_training:
+        t = torch.rand(num_frames, 1, device=device)
+    else:
+        t = torch.arange(num_frames, device=device).unsqueeze(1) / num_frames
+
     with torch.set_grad_enabled(is_training):
         (
-            pred_mels,
             loss,
-            loss_l1,
-            loss_l2,
-            loss_logvar,
+            loss_fm,
             loss_bce,
             extra,
         ) = model(
             iids=tokens,
             mels=features,
+            noise=noise,
+            t=t,
         )
 
         zero = torch.tensor(0.0, device=features.values().device)
         loss_rt = sum([e.loss_ratio for e in extra], zero)
 
-        loss = loss + loss_rt_weight * loss_rt * num_frames
+        loss = loss + loss_rt_weight * loss_rt
 
     assert loss.requires_grad == is_training
     info = MetricsTracker()
 
     info["frames"] = num_frames
-    info["loss"] = loss.detach().cpu().item()
-    info["loss_l1"] = loss_l1.detach().cpu().item()
-    info["loss_l2"] = loss_l2.detach().cpu().item()
-    info["loss_logvar"] = loss_logvar.detach().cpu().item()
-    info["loss_bce"] = loss_bce.detach().cpu().item()
+    info["loss"] = loss.detach().cpu().item() * num_frames
+    info["loss_fm"] = loss_fm.detach().cpu().item() * num_frames
+    info["loss_bce"] = loss_bce.detach().cpu().item() * num_frames
     info["loss_rt"] = loss_rt.detach().cpu().item() * num_frames
 
     for i, e in enumerate(extra):
         info[f"comp_ratio_{i}"] = e.compress_ratio * num_frames
 
-    return pred_mels, loss, info
+    return loss, info
 
 
 def train_one_epoch(
@@ -567,7 +572,7 @@ def train_one_epoch(
 
         try:
             with torch_autocast(dtype=torch.bfloat16, enabled=params.use_fp16):
-                pred_mels, loss, loss_info = compute_fbank_loss(
+                loss, loss_info = compute_fbank_loss(
                     model=model,
                     features=features,
                     features_lens=features_lens,
@@ -683,7 +688,7 @@ def compute_validation_loss(
             return_feature=True,
         )
         with torch_autocast(dtype=torch.bfloat16, enabled=params.use_fp16):
-            pred_mels, loss, loss_info = compute_fbank_loss(
+            loss, loss_info = compute_fbank_loss(
                 model=model,
                 features=features,
                 features_lens=features_lens,
@@ -691,39 +696,6 @@ def compute_validation_loss(
                 is_training=False,
                 loss_rt_weight=params.loss_rt_weight,
             )
-            if batch_idx == 0 and rank == 0:
-                # 取第 0 個
-                pm = pred_mels[0].detach().cpu().float()
-                tgt = features[0].detach().cpu().float()
-
-                # 確保形狀為 (時間, 頻率) 方便顯示；若現在是 (freq, time) 可轉置
-                def to_time_freq(x: torch.Tensor):
-                    if x.ndim == 2:
-                        # 兩種常見: (T, F) 或 (F, T)；假設頻率維通常較小
-                        return x if x.shape[1] <= x.shape[0] else x.T
-                    return x
-
-                pm_tf = to_time_freq(pm)
-                tgt_tf = to_time_freq(tgt)
-
-                fig, axes = plt.subplots(2, 1, figsize=(8, 6), constrained_layout=True)
-                im0 = axes[0].imshow(tgt_tf.T, origin="lower", aspect="auto")
-                axes[0].set_title("Target Mel (idx 0)")
-                fig.colorbar(im0, ax=axes[0], shrink=0.6)
-
-                im1 = axes[1].imshow(pm_tf.T, origin="lower", aspect="auto")
-                axes[1].set_title("Pred Mel (idx 0)")
-                fig.colorbar(im1, ax=axes[1], shrink=0.6)
-
-                wandb.log(
-                    {
-                        "valid/mel_compare_0": wandb.Image(fig),
-                        "valid/pred_mels_0_hist": wandb.Histogram(pm_tf.numpy()),
-                        "valid/features_0_hist": wandb.Histogram(tgt_tf.numpy()),
-                    },
-                    step=params.batch_idx_train,
-                )
-                plt.close(fig)
 
         assert loss.requires_grad is False
         tot_loss = tot_loss + loss_info
@@ -793,7 +765,7 @@ def scan_pessimistic_batches_for_oom(
         )
         try:
             with torch_autocast(dtype=torch.bfloat16, enabled=params.use_fp16):
-                pre_mels, loss, loss_info = compute_fbank_loss(
+                loss, loss_info = compute_fbank_loss(
                     params=params,
                     model=model,
                     features=features,

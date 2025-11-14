@@ -28,7 +28,7 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
       torchrun --nproc-per-node 4 --standalone -m zipvoice.bin.train_hnet_tts_fm \
             --use-fp16 1 \
             --num-iters 100000 \
-            --max-duration 240 \
+            --max-duration 160 \
             --max-len 20 \
             --base-lr 5e-4 \
             --valid-by-epoch 1 \
@@ -38,8 +38,8 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
             --dataset libritts \
             --manifest-dir data/fbank \
             --input-strategy PrecomputedFeaturesNJT \
-            --exp-dir exp/hnet_libritts_lr_5e-4_N5 \
-            --loss-rt-weight 5e-1 \
+            --exp-dir exp/hnet_libritts_fm_lr_5e-4_N2 \
+            --loss-rt-weight 1e-3 \
             --feat-scale 0.4343
 fi
 

@@ -25,6 +25,13 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 import torch.nn as nn
 from lhotse.dataset.sampling.base import CutSampler
+from torch.amp import GradScaler
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    get_model_state_dict,
+    get_state_dict,
+)
+from torch.distributed.fsdp import FSDPModule
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import Optimizer
 
@@ -75,17 +82,33 @@ def save_checkpoint(
     Returns:
       Return None.
     """
-    if rank != 0:
-        return
-
     logging.info(f"Saving checkpoint to {filename}")
 
     if isinstance(model, DDP):
         model = model.module
 
+    # for fsdp: all ranks must participate in full-state gathering to avoid deadlock
+    if isinstance(model, FSDPModule):
+        model_state, optimizer_state = get_state_dict(
+            model,
+            optimizer,
+            options=StateDictOptions(
+                full_state_dict=True,
+                cpu_offload=True,
+            ),
+        )
+
+    else:
+        model_state = model.state_dict()
+        optimizer_state = optimizer.state_dict() if optimizer is not None else None
+
+    # Only rank 0 writes to disk after collectives complete
+    if rank != 0:
+        return
+
     checkpoint = {
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict() if optimizer is not None else None,
+        "model": model_state,
+        "optimizer": optimizer_state,
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
         "grad_scaler": scaler.state_dict() if scaler is not None else None,
         "sampler": sampler.state_dict() if sampler is not None else None,
@@ -115,7 +138,6 @@ def load_checkpoint(
     checkpoint = torch.load(filename, map_location="cpu", weights_only=False)
 
     if model is not None:
-
         if next(iter(checkpoint["model"])).startswith("module."):
             logging.debug("Loading checkpoint saved by DDP")
             dst_state_dict = model.state_dict()
@@ -481,6 +503,7 @@ def update_averaged_model(
     params: Dict[str, torch.Tensor],
     model_cur: Union[nn.Module, DDP],
     model_avg: nn.Module,
+    rank: int = 0,
 ) -> None:
     """Update the averaged model:
     model_avg = model_cur * (average_period / batch_idx_train)
@@ -500,7 +523,21 @@ def update_averaged_model(
     if isinstance(model_cur, DDP):
         model_cur = model_cur.module
 
-    cur = model_cur.state_dict()
+    if isinstance(model_cur, FSDPModule):
+        # all ranks participate to avoid collective timeouts
+        cur = get_model_state_dict(
+            model_cur,
+            options=StateDictOptions(
+                full_state_dict=True,
+                cpu_offload=True,
+            ),
+        )
+    else:
+        cur = model_cur.state_dict()
+
+    if rank != 0:
+        return
+
     avg = model_avg.state_dict()
 
     average_state_dict(

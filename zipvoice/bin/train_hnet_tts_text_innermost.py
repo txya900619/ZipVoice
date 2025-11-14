@@ -59,7 +59,7 @@ from wandb.wandb_run import Run
 
 import zipvoice.utils.diagnostics as diagnostics
 from zipvoice.dataset.datamodule import TtsDataModule
-from zipvoice.models.hnet_tts import HNetTTS
+from zipvoice.models.hnet_tts_text_innermost import HNetTTS
 from zipvoice.tokenizer.tokenizer import (
     ByteTokenizer,
     EmiliaTokenizer,

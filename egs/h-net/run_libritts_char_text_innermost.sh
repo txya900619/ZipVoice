@@ -25,7 +25,7 @@ stop_stage=9
 
 if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
       echo "Stage 2: Train the ZipVoice model"
-      torchrun --nproc-per-node 4 --standalone -m zipvoice.bin.train_hnet_tts_fm \
+      torchrun --nproc-per-node 4 --standalone -m zipvoice.bin.train_hnet_tts_text_innermost \
             --use-fp16 1 \
             --num-iters 100000 \
             --max-duration 240 \
@@ -38,8 +38,8 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
             --dataset libritts \
             --manifest-dir data/fbank \
             --input-strategy PrecomputedFeaturesNJT \
-            --exp-dir exp/hnet_libritts_lr_5e-4_N5 \
-            --loss-rt-weight 5e-1 \
+            --exp-dir exp/hnet_libritts_lr_5e-4_N2_text_innermost_rt_5e-2 \
+            --loss-rt-weight 1e-1 \
             --feat-scale 0.4343
 fi
 

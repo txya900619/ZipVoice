@@ -88,8 +88,8 @@ class MelPostNet(nn.Module):
 class HNetTTS(BlockBoundaryMixin, nn.Module):
     def __init__(self, c: HNetConfig):
         super().__init__()
-        self.c, v, d = c, c.vocab_size, c.d_model[0]
-        self.embeddings = nn.Embedding(v, d)
+        self.c, v, d, text_d = c, c.vocab_size, c.d_model[0], c.d_model[-1]
+        self.embeddings = nn.Embedding(v, text_d)
         self.backbone = HNet(c, stage_idx=0)
 
         # maybe don't need this
@@ -109,10 +109,7 @@ class HNetTTS(BlockBoundaryMixin, nn.Module):
         mels_input = self.dropout(mels_input)
 
         mels_input = nested.as_nested_tensor(
-            [
-                torch.cat((t_i, self.mel_bos, m_i[:-1]), dim=0)
-                for t_i, m_i in zip(text_condition.unbind(), mels_input.unbind())
-            ],
+            [torch.cat((self.mel_bos, m_i[:-1]), dim=0) for m_i in mels_input.unbind()],
             layout=torch.jagged,
         )
 
@@ -120,25 +117,9 @@ class HNetTTS(BlockBoundaryMixin, nn.Module):
         cu_s, msl = mels_input.offsets(), mels_input._get_max_seqlen()
         x_flat = mels_input.values()
 
-        x_flat, extra = self.backbone(x_flat, cu_s, msl)
-
-        # unflatten njt
-        x = nested.nested_tensor_from_jagged(
-            values=x_flat, offsets=cu_s, max_seqlen=msl
+        x_flat, extra = self.backbone(
+            x_flat, cu_s, msl, text_condition.values(), text_condition.offsets()
         )
-
-        # delete text condition
-        x = nested.as_nested_tensor(
-            [
-                x_i[t_i.shape[0] :]
-                for x_i, t_i in zip(x.unbind(), text_condition.unbind())
-            ],
-            layout=torch.jagged,
-        )
-
-        # flatten njt again
-        cu_s, msl = x.offsets(), x._get_max_seqlen()
-        x_flat = x.values()
 
         stop_logits = self.stop_head(x_flat)
         stop_labels = torch.zeros_like(stop_logits)
@@ -204,10 +185,7 @@ class HNetTTS(BlockBoundaryMixin, nn.Module):
 
         mels_inputs = self.mel_prenet(prompt_features)
         mels_inputs = NJT(
-            [
-                torch.cat((t_i, self.mel_bos, m_i), dim=0)
-                for t_i, m_i in zip(text_condition.unbind(), mels_inputs.unbind())
-            ]
+            [torch.cat((self.mel_bos, m_i), dim=0) for m_i in mels_inputs.unbind()]
         )
 
         batch_size = tokens.shape[0]
@@ -222,7 +200,9 @@ class HNetTTS(BlockBoundaryMixin, nn.Module):
 
             cu_s, msl = mels_inputs.offsets(), mels_inputs._get_max_seqlen()
             x_flat = mels_inputs.values()
-            x_flat, _ = self.backbone(x_flat, cu_s, msl)
+            x_flat, _ = self.backbone(
+                x_flat, cu_s, msl, text_condition.values(), text_condition.offsets()
+            )
 
             x = nested.nested_tensor_from_jagged(
                 values=x_flat, offsets=cu_s, max_seqlen=msl

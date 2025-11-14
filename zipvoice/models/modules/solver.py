@@ -45,7 +45,7 @@ class DiffusionModel(torch.nn.Module):
         speech_condition: torch.Tensor,
         padding_mask: Optional[torch.Tensor] = None,
         guidance_scale: Union[float, torch.Tensor] = 0.0,
-        **kwargs
+        **kwargs,
     ) -> torch.Tensor:
         """
         Forward function that Handles the classifier-free guidance.
@@ -75,7 +75,7 @@ class DiffusionModel(torch.nn.Module):
                 text_condition=text_condition,
                 speech_condition=speech_condition,
                 padding_mask=padding_mask,
-                **kwargs
+                **kwargs,
             )
         else:
             assert t.dim() == 0
@@ -103,7 +103,7 @@ class DiffusionModel(torch.nn.Module):
                 text_condition=text_condition,
                 speech_condition=speech_condition,
                 padding_mask=padding_mask,
-                **kwargs
+                **kwargs,
             ).chunk(2, dim=0)
 
             res = (1 + guidance_scale) * data_cond - guidance_scale * data_uncond
@@ -132,7 +132,7 @@ class DistillDiffusionModel(DiffusionModel):
         speech_condition: torch.Tensor,
         padding_mask: Optional[torch.Tensor] = None,
         guidance_scale: Union[float, torch.Tensor] = 0.0,
-        **kwargs
+        **kwargs,
     ) -> torch.Tensor:
         """
         Forward function that Handles the classifier-free guidance.
@@ -161,7 +161,7 @@ class DistillDiffusionModel(DiffusionModel):
             speech_condition=speech_condition,
             padding_mask=padding_mask,
             guidance_scale=guidance_scale,
-            **kwargs
+            **kwargs,
         )
 
 
@@ -190,7 +190,7 @@ class EulerSolver:
         t_start: float = 0.0,
         t_end: float = 1.0,
         t_shift: float = 1.0,
-        **kwargs
+        **kwargs,
     ) -> torch.Tensor:
         """
         Compute the sample at time `t_end` by Euler Solver.
@@ -234,7 +234,7 @@ class EulerSolver:
                 speech_condition=speech_condition,
                 padding_mask=padding_mask,
                 guidance_scale=guidance_scale,
-                **kwargs
+                **kwargs,
             )
             x = x + v * (timesteps[step + 1] - timesteps[step])
         return x
@@ -279,3 +279,131 @@ def get_time_steps(
     timesteps = t_shift * timesteps / (1 + (t_shift - 1) * timesteps)
 
     return timesteps
+
+
+class HNetDiffusionModel(torch.nn.Module):
+    """A wrapper of diffusion models for inference.
+    Args:
+        model: The diffusion model.
+        func_name: The function name to call.
+    """
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        func_name: str = "forward_fm_decoder",
+    ):
+        super().__init__()
+        self.model = model
+        self.func_name = func_name
+        self.model_func = getattr(self.model, func_name)
+
+    def forward(
+        self,
+        t: torch.Tensor,
+        x: torch.Tensor,
+        condition: torch.Tensor,
+        guidance_scale: Union[float, torch.Tensor] = 0.0,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Forward function that Handles the classifier-free guidance.
+        Args:
+            t: The current timestep, a tensor of a tensor of a single float.
+            x: The initial value, with the shape (batch, seq_len, emb_dim).
+            text_condition: The text_condition of the diffision model, with
+                the shape (batch, seq_len, emb_dim).
+            speech_condition: The speech_condition of the diffision model, with the
+                shape (batch, seq_len, emb_dim).
+            padding_mask: The mask for padding; True means masked position, with the
+                shape (batch, seq_len).
+            guidance_scale: The scale of classifier-free guidance, a float or a tensor
+                of shape (batch, 1, 1).
+        Retrun:
+            The prediction with the shape (batch, seq_len, emb_dim).
+        """
+        if not torch.is_tensor(guidance_scale):
+            guidance_scale = torch.tensor(
+                guidance_scale, dtype=t.dtype, device=t.device
+            )
+
+        if (guidance_scale == 0.0).all():
+            return self.model_func(
+                t=t,
+                xt=x,
+                condition=condition,
+                **kwargs,
+            )
+        else:
+            return NotImplementedError
+
+
+class HNetEulerSolver:
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        func_name: str = "forward_fm_decoder",
+    ):
+        """Construct a Euler Solver
+        Args:
+            model: The diffusion model.
+            func_name: The function name to call.
+        """
+
+        self.model = HNetDiffusionModel(model, func_name=func_name)
+
+    def sample(
+        self,
+        x: torch.Tensor,
+        condition: torch.Tensor,
+        num_step: int = 10,
+        guidance_scale: Union[float, torch.Tensor] = 0.0,
+        t_start: float = 0.0,
+        t_end: float = 1.0,
+        t_shift: float = 1.0,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Compute the sample at time `t_end` by Euler Solver.
+        Args:
+            x: The initial value at time `t_start`, with the shape (batch, seq_len,
+                emb_dim).
+            text_condition: The text condition of the diffision mode, with the
+                shape (batch, seq_len, emb_dim).
+            speech_condition: The speech condition of the diffision model, with the
+                shape (batch, seq_len, emb_dim).
+            padding_mask: The mask for padding; True means masked position, with the
+                shape (batch, seq_len).
+            num_step: The number of ODE steps.
+            guidance_scale: The scale for classifier-free guidance, which is
+                a float or a tensor with the shape (batch, 1, 1).
+            t_start: the start timestep in the range of [0, 1].
+            t_end: the end time_step in the range of [0, 1].
+            t_shift: shift the t toward smaller numbers so that the sampling
+                will emphasize low SNR region. Should be in the range of (0, 1].
+                The shifting will be more significant when the number is smaller.
+
+        Returns:
+            The approximated solution at time `t_end`.
+        """
+        device = x.device
+        assert isinstance(t_start, float) and isinstance(t_end, float)
+
+        timesteps = get_time_steps(
+            t_start=t_start,
+            t_end=t_end,
+            num_step=num_step,
+            t_shift=t_shift,
+            device=device,
+        )
+
+        for step in range(num_step):
+            v = self.model(
+                t=timesteps[step].unsqueeze(0),
+                x=x,
+                condition=condition,
+                guidance_scale=guidance_scale,
+                **kwargs,
+            )
+            x = x + v * (timesteps[step + 1] - timesteps[step])
+        return x
