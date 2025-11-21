@@ -1,7 +1,7 @@
 {
-    "arch_layout": ["m3", ["T1m3", ["T16"], "m3T1"], "m3"],
-    "d_model": [512, 768, 1024],
-    "d_intermediate": [0, 2048, 2688],
+    "arch_layout": ["m4", ["T1m4", ["T12"], "m4T1"], "m4"],
+    "d_model": [768, 768, 1024],
+    "d_intermediate": [0, 3072, 4096],
     "ssm_cfg": {
         "chunk_size": 256,
         "d_conv": 4,
@@ -9,9 +9,10 @@
         "expand": 2
     },
     "attn_cfg": {
-        "num_heads": [8, 12, 16],
+        "num_heads": [12, 12, 16],
         "rotary_emb_dim": [32, 32, 32],
         "window_size": [1023, 1023, -1]
     },
-    "tie_embeddings": false
+    "tie_embeddings": false,
+    "N_compress": [1, 2, 4]
 }

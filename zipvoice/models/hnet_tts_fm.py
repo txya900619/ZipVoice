@@ -75,7 +75,9 @@ def concat_flat_with_bos(
         + bos_cu[flat2_batch_idx + 1]
     )
 
-    perm = torch.cat([flat1_dest_idx, bos_dest_idx, flat2_dest_idx], dim=0)
+    inverse_perm = torch.cat([flat1_dest_idx, bos_dest_idx, flat2_dest_idx], dim=0)
+    perm = inverse_perm.argsort()
+
     perm_expanded = perm.unsqueeze(1).expand(-1, flat1.shape[1])
 
     concated_flat = torch.cat(
@@ -118,12 +120,16 @@ class MelPreNet(nn.Module):
             # Apply dropout to entire tensor, then select based on mask (non-inplace)
             x_full_dropped = self.dropout(x)
             x = torch.where(dropout_mask.unsqueeze(-1), x_full_dropped, x)
+        else:
+            x = F.dropout(x, p=0.5, training=True)
         x = self.hidden_linear(x)
         x = self.relu(x)
         if dropout_mask is not None:
             # Apply dropout to entire tensor, then select based on mask (non-inplace)
             x_full_dropped = self.dropout(x)
             x = torch.where(dropout_mask.unsqueeze(-1), x_full_dropped, x)
+        else:
+            x = F.dropout(x, p=0.5, training=True)
         return self.output_linear(x)
 
 
@@ -136,6 +142,7 @@ class HNetTTS(BlockBoundaryMixin, nn.Module):
 
         # maybe don't need this
         self.mel_prenet = MelPreNet(100, 512, d)
+        self.lm_head = nn.Linear(d, 100)
         self.fm_head = FlowMatchingHead(100, d)
 
         self.mel_bos = nn.Parameter(torch.randn(1, d))
@@ -169,7 +176,7 @@ class HNetTTS(BlockBoundaryMixin, nn.Module):
             mask_percent=(0.7, 1.0),
         )  # speech condition is False, non-speech condition is True
 
-        input_mels = self.mel_prenet(input_mels, dropout_mask=speech_condition_mask)
+        input_mels = self.mel_prenet(input_mels)
 
         x_flat, cu_s, msl, inverse_perm = concat_flat_with_bos(
             text_condition, text_condition_cu, input_mels, input_mel_cu, self.mel_bos
@@ -183,8 +190,8 @@ class HNetTTS(BlockBoundaryMixin, nn.Module):
         stop_labels = torch.zeros_like(stop_logits)
         stop_labels[target_mel_cu[1:] - 1] = 1
         loss_bce = F.binary_cross_entropy_with_logits(
-            stop_logits[speech_condition_mask],
-            stop_labels[speech_condition_mask],
+            stop_logits,
+            stop_labels,
             pos_weight=torch.Tensor([100]).to(stop_logits.device),
         )
 
@@ -192,22 +199,24 @@ class HNetTTS(BlockBoundaryMixin, nn.Module):
         noise, _ = get_target_mel(noise, mels.offsets())
 
         # need condition_drop_ratio?
-        xt = target_mels[speech_condition_mask] * t[speech_condition_mask] + noise[
-            speech_condition_mask
-        ] * (1 - t[speech_condition_mask])
-        ut = target_mels[speech_condition_mask] - noise[speech_condition_mask]
-        vt = self.forward_fm_decoder(
-            t[speech_condition_mask], xt, pred_features[speech_condition_mask]
-        )
+        xt = target_mels * t + noise * (1 - t)
+        ut = target_mels - noise
+        vt = self.forward_fm_decoder(t, xt, pred_features)
         loss_fm = torch.mean((vt - ut) ** 2)
 
+        lm_logits = self.lm_head(pred_features)
+        cond_loss_l1 = F.l1_loss(lm_logits, target_mels)
+        cond_loss_l2 = F.mse_loss(lm_logits, target_mels)
+        loss_cond = cond_loss_l1 + cond_loss_l2
+
         # loss_bce may need *0.01
-        loss = loss_fm + loss_bce * 0.01
+        loss = loss_fm + loss_bce * 0.01 + loss_cond * 0.1
 
         return (
             loss,
             loss_fm,
             loss_bce,
+            loss_cond,
             extra,
         )
 

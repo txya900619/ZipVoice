@@ -86,7 +86,7 @@ from zipvoice.utils.common import (
     str2bool,
     torch_autocast,
 )
-from zipvoice.utils.hooks import register_inf_check_hooks, report_grad_coverage
+from zipvoice.utils.hooks import register_inf_check_hooks
 from zipvoice.utils.lr_scheduler import LRScheduler
 
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, LRScheduler]
@@ -439,6 +439,7 @@ def compute_fbank_loss(
             loss,
             loss_fm,
             loss_bce,
+            loss_cond,
             extra,
         ) = model(
             iids=tokens,
@@ -460,6 +461,7 @@ def compute_fbank_loss(
     info["loss_fm"] = loss_fm.detach().cpu().item() * num_frames
     info["loss_bce"] = loss_bce.detach().cpu().item() * num_frames
     info["loss_rt"] = loss_rt.detach().cpu().item() * num_frames
+    info["loss_cond"] = loss_cond.detach().cpu().item() * num_frames
 
     for i, e in enumerate(extra):
         info[f"comp_ratio_{i}"] = e.compress_ratio * num_frames
@@ -584,11 +586,6 @@ def train_one_epoch(
             tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
 
             loss.backward()
-
-            if params.grad_coverage:
-                report_grad_coverage(model)
-                # Exit after reporting once to keep it fast/deterministic
-                return
 
             optimizer.step()
             optimizer.zero_grad()
