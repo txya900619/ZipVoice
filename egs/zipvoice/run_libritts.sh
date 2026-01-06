@@ -26,8 +26,8 @@ fi
 if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
       echo "Stage 2: Train the ZipVoice model"
       python3 -m zipvoice.bin.train_zipvoice \
-            --world-size 8 \
-            --use-fp16 0 \
+            --world-size 4 \
+            --use-fp16 1 \
             --num-epochs 60 \
             --max-duration 250 \
             --lr-epochs 10 \
@@ -38,7 +38,8 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
             --token-file data/tokens_libritts.txt \
             --dataset libritts \
             --manifest-dir data/fbank \
-            --exp-dir exp/zipvoice_libritts
+            --exp-dir exp/zipvoice_libritts \
+            --wandb 1
 fi
 
 if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then

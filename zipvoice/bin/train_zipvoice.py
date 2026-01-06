@@ -48,12 +48,12 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
+import wandb
 from lhotse.cut import Cut, CutSet
 from lhotse.utils import fix_random_seed
 from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import Optimizer
-from torch.utils.tensorboard import SummaryWriter
 
 import zipvoice.utils.diagnostics as diagnostics
 from zipvoice.dataset.datamodule import TtsDataModule
@@ -115,10 +115,10 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--tensorboard",
+        "--wandb",
         type=str2bool,
         default=True,
-        help="Should various information be logged in tensorboard.",
+        help="Should various information be logged in wandb.",
     )
 
     parser.add_argument(
@@ -466,7 +466,6 @@ def compute_fbank_loss(
             .unsqueeze(2)
         )
     with torch.set_grad_enabled(is_training):
-
         loss = model(
             tokens=tokens,
             features=features,
@@ -494,7 +493,7 @@ def train_one_epoch(
     valid_dl: torch.utils.data.DataLoader,
     scaler: GradScaler,
     model_avg: Optional[nn.Module] = None,
-    tb_writer: Optional[SummaryWriter] = None,
+    run: Optional[wandb.Run] = None,
     world_size: int = 1,
     rank: int = 0,
 ) -> None:
@@ -549,7 +548,6 @@ def train_one_epoch(
         )
 
     for batch_idx, batch in enumerate(train_dl):
-
         if batch_idx % 10 == 0:
             if params.finetune:
                 set_batch_count(model, get_adjusted_batch_count(params) + 100000)
@@ -579,10 +577,8 @@ def train_one_epoch(
                 f"Maximum memory allocated so far is "
                 f"{torch.cuda.max_memory_allocated() // 1000000}MB"
             )
-            if tb_writer is not None:
-                valid_info.write_summary(
-                    tb_writer, "train/valid_", params.batch_idx_train
-                )
+            if run is not None:
+                valid_info.write_wandb(run, "valid/", params.batch_idx_train)
 
         params.batch_idx_train += 1
 
@@ -699,19 +695,22 @@ def train_one_epoch(
                 + (f"grad_scale: {scaler._scale.item()}" if params.use_fp16 else "")
             )
 
-            if tb_writer is not None:
-                tb_writer.add_scalar(
-                    "train/learning_rate", cur_lr, params.batch_idx_train
+            if run is not None:
+                run.log(
+                    {
+                        "train/learning_rate": cur_lr,
+                    },
+                    step=params.batch_idx_train,
                 )
-                loss_info.write_summary(
-                    tb_writer, "train/current_", params.batch_idx_train
-                )
-                tot_loss.write_summary(tb_writer, "train/tot_", params.batch_idx_train)
+
+                loss_info.write_wandb(run, "train/current_", params.batch_idx_train)
+                tot_loss.write_wandb(run, "train/tot_", params.batch_idx_train)
                 if params.use_fp16:
-                    tb_writer.add_scalar(
-                        "train/grad_scale",
-                        cur_grad_scale,
-                        params.batch_idx_train,
+                    run.log(
+                        {
+                            "train/grad_scale": cur_grad_scale,
+                        },
+                        step=params.batch_idx_train,
                     )
 
     loss_value = tot_loss["loss"]
@@ -820,7 +819,6 @@ def scan_pessimistic_batches_for_oom(
         )
         try:
             with torch_autocast(dtype=torch.float16, enabled=params.use_fp16):
-
                 loss, loss_info = compute_fbank_loss(
                     params=params,
                     model=model,
@@ -889,10 +887,15 @@ def run(rank, world_size, args):
     copyfile(src=params.token_file, dst=f"{params.exp_dir}/tokens.txt")
     setup_logger(f"{params.exp_dir}/log/log-train")
 
-    if args.tensorboard and rank == 0:
-        tb_writer = SummaryWriter(log_dir=f"{params.exp_dir}/tensorboard")
+    if args.wandb and rank == 0:
+        run = wandb.init(
+            project="zipvoice",
+            name=f"train_zipvoice_{params.dataset}",
+            config=params,
+            dir=f"{params.exp_dir}/wandb",
+        )
     else:
-        tb_writer = None
+        run = None
 
     if torch.cuda.is_available():
         params.device = torch.device("cuda", rank)
@@ -1057,8 +1060,13 @@ def run(rank, world_size, args):
 
         params.cur_epoch = epoch
 
-        if tb_writer is not None:
-            tb_writer.add_scalar("train/epoch", epoch, params.batch_idx_train)
+        if run is not None:
+            run.log(
+                {
+                    "train/epoch": epoch,
+                },
+                step=params.batch_idx_train,
+            )
 
         train_one_epoch(
             params=params,
@@ -1069,7 +1077,7 @@ def run(rank, world_size, args):
             train_dl=train_dl,
             valid_dl=valid_dl,
             scaler=scaler,
-            tb_writer=tb_writer,
+            run=run,
             world_size=world_size,
             rank=rank,
         )
