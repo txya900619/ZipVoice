@@ -21,13 +21,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from wandb.wandb_run import Run
 
-from zipvoice.models.modules.utils import NJT
-
-
 if hasattr(torch.amp, "GradScaler"):
-    from torch.amp import GradScaler
+    from torch.amp import GradScaler  # noqa: F401
 else:
-    from torch.cuda.amp import GradScaler
+    from torch.cuda.amp import GradScaler  # noqa: F401
 
 Pathlike = Union[str, Path]
 
@@ -258,7 +255,8 @@ def prepare_input(
     return_list = []
 
     if return_tokens:
-        return_list += [NJT(batch["tokens"]).to(device)]
+        # if hnet use njt
+        return_list += [batch["tokens"]]
 
     if return_feature:
         features = batch["features"].to(device)

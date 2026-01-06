@@ -197,3 +197,4 @@ cython_debug/
 data/
 exp/
 download/
+*.wav

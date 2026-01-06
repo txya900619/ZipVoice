@@ -60,6 +60,7 @@ from wandb.wandb_run import Run
 import zipvoice.utils.diagnostics as diagnostics
 from zipvoice.dataset.datamodule import TtsDataModule
 from zipvoice.models.hnet_tts_text_innermost import HNetTTS
+from zipvoice.models.modules.utils import NJT
 from zipvoice.tokenizer.tokenizer import (
     ByteTokenizer,
     EmiliaTokenizer,
@@ -86,7 +87,7 @@ from zipvoice.utils.common import (
     str2bool,
     torch_autocast,
 )
-from zipvoice.utils.hooks import register_inf_check_hooks, report_grad_coverage
+from zipvoice.utils.hooks import register_inf_check_hooks
 from zipvoice.utils.lr_scheduler import LRScheduler
 
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, LRScheduler]
@@ -564,6 +565,7 @@ def train_one_epoch(
             return_tokens=True,
             return_feature=True,
         )
+        tokens = [NJT(token) for token in tokens]
 
         try:
             with torch_autocast(dtype=torch.bfloat16, enabled=params.use_fp16):
@@ -579,11 +581,6 @@ def train_one_epoch(
             tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
 
             loss.backward()
-
-            if params.grad_coverage:
-                report_grad_coverage(model)
-                # Exit after reporting once to keep it fast/deterministic
-                return
 
             optimizer.step()
             optimizer.zero_grad()
